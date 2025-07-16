@@ -1,4 +1,4 @@
-name: Security Scans (SonarQube + Trivy)
+name: Security Scan Only (SonarQube + Trivy)
 
 on:
   push:
@@ -6,20 +6,19 @@ on:
   workflow_dispatch:
 
 env:
+  IMAGE_NAME: narsi421/juice-shop
   SONAR_PROJECT_KEY: juice-shop
   SONAR_PROJECT_NAME: JuiceShop
   DEFECTDOJO_ENGAGEMENT_ID: 1
-  IMAGE_TAG: ${{ github.sha }}
 
 jobs:
   security-scan:
     runs-on: self-hosted
 
     steps:
-      - name: Checkout source
+      - name: Checkout Source
         uses: actions/checkout@v4
 
-      # --- SONARQUBE SCAN ---
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -34,7 +33,7 @@ jobs:
       - name: Add SonarScanner to PATH
         run: echo "/opt/sonar-scanner/bin" >> $GITHUB_PATH
 
-      - name: Run SonarQube Analysis
+      - name: SonarQube Analysis
         run: |
           sonar-scanner \
             -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }} \
@@ -43,9 +42,9 @@ jobs:
             -Dsonar.host.url=${{ secrets.SONAR_URL }} \
             -Dsonar.login=${{ secrets.SONAR_TOKEN }}
 
-      - name: Download SonarQube Issues Report
+      - name: Download SonarQube Report
         run: |
-          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+          curl -u ${{ secrets.SONAR_TOKEN }}: \
             "${{ secrets.SONAR_URL }}/api/issues/search?componentKeys=${{ env.SONAR_PROJECT_KEY }}&resolved=false" \
             -o sonarqube-report.json
 
@@ -59,18 +58,19 @@ jobs:
             -F "active=true" \
             -F "verified=true"
 
-      # --- TRIVY SCAN ---
-      - name: Build Docker Image for Trivy Scan
-        run: docker build -t security-scan:${{ env.IMAGE_TAG }} .
+      - name: Docker Build (for Trivy scan)
+        run: docker build -t $IMAGE_NAME:${{ github.run_number }} .
 
-      - name: Run Trivy Scan on Docker Image
+      - name: Trivy Scan (Docker Image)
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v $HOME/.trivy-cache:/root/.cache/ \
             -v ${{ github.workspace }}:/root/scan \
-            aquasec/trivy:latest \
-            image --format json --output /root/scan/trivy-report.json security-scan:${{ env.IMAGE_TAG }}
+            aquasec/trivy image \
+            --format json \
+            --output /root/scan/trivy-report.json \
+            $IMAGE_NAME:${{ github.run_number }}
 
       - name: Upload Trivy Report to DefectDojo
         run: |
@@ -82,11 +82,10 @@ jobs:
             -F "active=true" \
             -F "verified=true"
 
-      # --- ARCHIVE REPORTS
-      - name: Archive Reports as Artifacts
+      - name: Archive JSON Reports
         uses: actions/upload-artifact@v4
         with:
           name: security-scan-reports
           path: |
-            sonarqube-report.json
             trivy-report.json
+            sonarqube-report.json
