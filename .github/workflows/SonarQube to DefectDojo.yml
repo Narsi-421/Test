@@ -15,6 +15,11 @@ jobs:
     runs-on: self-hosted
 
     steps:
+    - name: Clean Workspace
+      run: |
+        sudo rm -rf /opt/runner/_work/*
+        docker system prune -af || true
+
     - name: Checkout source
       uses: actions/checkout@v4
 
@@ -28,7 +33,6 @@ jobs:
       run: echo "/opt/sonar-scanner/bin" >> $GITHUB_PATH
 
     - name: SonarQube Analysis
-      timeout-minutes: 30
       run: |
         sonar-scanner \
           -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }} \
@@ -41,68 +45,59 @@ jobs:
       run: |
         curl -u ${{ secrets.SONAR_TOKEN }}: \
           "${{ secrets.SONAR_URL }}/api/issues/search?componentKeys=${{ env.SONAR_PROJECT_KEY }}&resolved=false&ps=500" \
-          -o raw-sonarqube-report.json
-        echo "Raw report size: $(du -h raw-sonarqube-report.json | cut -f1)"
+          -o sonarqube-report.json
 
     - name: Transform Report for DefectDojo
       run: |
+        # Convert to DefectDojo-compatible format
         jq '{
-          findings: [.issues[] | {
-            title: .message,
-            severity: (if .severity == "BLOCKER" then "Critical"
-                     elif .severity == "CRITICAL" then "High"
-                     elif .severity == "MAJOR" then "Medium"
-                     elif .severity == "MINOR" then "Low"
-                     else "Info" end),
-            description: (.component + ": " + .message),
-            file_path: .component,
-            line: .textRange.startLine,
-            vulnerability_ids: [{"vulnerability_id": .rule}]
+          "findings": [.issues[] | {
+            "title": .message,
+            "severity": (if .severity == "BLOCKER" then "Critical"
+                      elif .severity == "CRITICAL" then "High"
+                      elif .severity == "MAJOR" then "Medium"
+                      elif .severity == "MINOR" then "Low"
+                      else "Info" end),
+            "description": (.component + ": " + .message),
+            "file_path": .component,
+            "line": .textRange.startLine,
+            "vulnerability_ids": [{"vulnerability_id": .rule}]
           }]
-        }' raw-sonarqube-report.json > defectdojo-ready.json
-        
-        echo "Transformed report size: $(du -h defectdojo-ready.json | cut -f1)"
-        rm raw-sonarqube-report.json
+        }' sonarqube-report.json > defectdojo-ready.json
 
-    - name: Upload to DefectDojo (Retry Logic)
+    - name: Get Valid Scan Types
+      id: get_scan_types
       run: |
-        for attempt in {1..3}; do
-          echo "Attempt $attempt/3"
-          response=$(curl -vvv -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
+        scan_types=$(curl -s -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
+          "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" | jq '.actions.POST.scan_type.choices[]')
+        echo "Available scan types: $scan_types"
+        echo "scan_types=$scan_types" >> $GITHUB_OUTPUT
+
+    - name: Upload to DefectDojo
+      run: |
+        # Try common SonarQube scan type variants
+        for scan_type in "SonarQube Scan" "SonarQube detailed" "SonarQube"; do
+          echo "Trying scan type: $scan_type"
+          response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
             "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
             -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
-            -F "scan_type=SonarQube" \
+            -F "scan_type=$scan_type" \
             -F "engagement=${{ env.DEFECTDOJO_ENGAGEMENT_ID }}" \
             -F "file=@defectdojo-ready.json" \
             -F "close_old_findings=true" \
             -F "verified=true")
-            
+          
           http_code=$(echo "$response" | grep 'HTTP_STATUS:' | cut -d':' -f2)
-          body=$(echo "$response" | sed '/HTTP_STATUS:/d')
-          
-          echo "Status: $http_code"
-          echo "Response: $body"
-          
           if [ "$http_code" -eq 201 ]; then
-            echo "Upload succeeded"
+            echo "Upload successful with scan type: $scan_type"
             exit 0
           fi
-          
-          sleep $((attempt * 10))
         done
+        echo "All scan type attempts failed"
         exit 1
 
-    - name: Clean Workspace (Post-Job)
+    - name: Cleanup
       if: always()
       run: |
-        echo "=== Post-Job Cleanup ==="
-        rm -f defectdojo-ready.json sonarqube-report.json
+        rm -f sonarqube-report.json defectdojo-ready.json
         docker system prune -f
-        sudo find /opt/runner/_work -type f -mtime +1 -delete
-
-    - name: Archive Results
-      uses: actions/upload-artifact@v4
-      with:
-        name: scan-results
-        path: defectdojo-ready.json
-        retention-days: 1
