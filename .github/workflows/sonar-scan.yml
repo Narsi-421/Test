@@ -1,4 +1,4 @@
-name: SonarQube Scan
+name: SonarQube Analysis Pipeline
 
 on:
   push:
@@ -7,73 +7,42 @@ on:
 
 env:
   SONAR_PROJECT_KEY: juice-shop
-  DEFECTDOJO_ENGAGEMENT_ID: 1
+  SONAR_PROJECT_NAME: JuiceShop
 
 jobs:
-  sonarqube-scan:
+  sonarqube-analysis:
     runs-on: self-hosted
 
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
+    - name: Checkout source
+      uses: actions/checkout@v4
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
+    - name: Set up JDK 21
+      uses: actions/setup-java@v4
+      with:
+        java-version: '21'
+        distribution: 'temurin'
 
-      - name: Add SonarScanner to PATH
-        run: echo "/opt/sonar-scanner/bin" >> $GITHUB_PATH
+    - name: Add SonarScanner to PATH
+      run: echo "/opt/sonar-scanner/bin" >> $GITHUB_PATH
 
-      - name: Run SonarQube Analysis
-        run: |
-          sonar-scanner \
-            -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }} \
-            -Dsonar.sources=. \
-            -Dsonar.host.url=${{ secrets.SONAR_URL }} \
-            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+    - name: SonarQube Analysis
+      run: |
+        sonar-scanner \
+          -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }} \
+          -Dsonar.projectName=${{ env.SONAR_PROJECT_NAME }} \
+          -Dsonar.sources=. \
+          -Dsonar.host.url=${{ secrets.SONAR_URL }} \
+          -Dsonar.login=${{ secrets.SONAR_TOKEN }}
 
-      - name: Install Python Requests
-        run: pip install requests
+    - name: Download SonarQube Report
+      run: |
+        curl -u ${{ secrets.SONAR_TOKEN }}: \
+          "${{ secrets.SONAR_URL }}/api/issues/search?componentKeys=${{ env.SONAR_PROJECT_KEY }}&resolved=false" \
+          -o sonarqube-report.json
 
-      - name: Download SonarQube Issues (Paginated)
-        run: |
-          cat <<EOF > sonarqube_fetch.py
-          import requests, json
-
-          sonar_url = "${{ secrets.SONAR_URL }}"
-          project_key = "${{ env.SONAR_PROJECT_KEY }}"
-          token = "${{ secrets.SONAR_TOKEN }}"
-          headers = {"Authorization": f"Bearer {token}"}
-
-          all_issues, page, page_size = [], 1, 500
-          while True:
-              url = f"{sonar_url}/api/issues/search?projects={project_key}&p={page}&ps={page_size}"
-              res = requests.get(url, headers=headers)
-              data = res.json()
-              all_issues += data.get("issues", [])
-              if page * page_size >= data.get("total", 0): break
-              page += 1
-
-          with open("sonarqube-report.json", "w") as f:
-              json.dump({"issues": all_issues}, f, indent=2)
-          EOF
-
-          python sonarqube_fetch.py
-
-      - name: Upload SonarQube Report to DefectDojo
-        run: |
-          curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
-            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
-            -F "scan_type=SonarQube Scan" \
-            -F "engagement=${{ env.DEFECTDOJO_ENGAGEMENT_ID }}" \
-            -F "file=@sonarqube-report.json" \
-            -F "active=true" \
-            -F "verified=true"
-
-      - name: Archive Report
-        uses: actions/upload-artifact@v4
-        with:
-          name: sonarqube-report
-          path: sonarqube-report.json
+    - name: Archive SonarQube Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: sonarqube-results
+        path: sonarqube-report.json
