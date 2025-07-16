@@ -1,4 +1,4 @@
-name: SonarQube to DefectDojo Pipeline
+name: CI/CD Pipeline with Security Scanning
 
 on:
   push:
@@ -6,28 +6,35 @@ on:
   workflow_dispatch:
 
 env:
+  IMAGE_NAME: narsi421/juice-shop
   SONAR_PROJECT_KEY: juice-shop
   SONAR_PROJECT_NAME: JuiceShop
   DEFECTDOJO_ENGAGEMENT_ID: 1
 
 jobs:
-  sonarqube-analysis:
+  secure-pipeline:
     runs-on: self-hosted
+    timeout-minutes: 45
 
     steps:
     - name: Checkout source
       uses: actions/checkout@v4
 
-    - name: Set up JDK 21
+    - name: Setup Environment
+      uses: actions/setup-node@v4
+      with:
+        node-version: '21'
+        
+    - name: Setup Java
       uses: actions/setup-java@v4
       with:
         java-version: '21'
         distribution: 'temurin'
 
-    - name: Add SonarScanner to PATH
+    - name: Configure SonarScanner
       run: echo "/opt/sonar-scanner/bin" >> $GITHUB_PATH
 
-    - name: SonarQube Analysis
+    - name: Run SonarQube Analysis
       run: |
         sonar-scanner \
           -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }} \
@@ -36,37 +43,111 @@ jobs:
           -Dsonar.host.url=${{ secrets.SONAR_URL }} \
           -Dsonar.login=${{ secrets.SONAR_TOKEN }}
 
-    - name: Download SonarQube Report
+    - name: Build Docker Image
+      run: docker build -t $IMAGE_NAME:${{ github.run_number }} .
+
+    - name: Run Trivy Security Scan
       run: |
+        docker run --rm \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -v $HOME/.trivy-cache:/root/.cache/ \
+          -v ${{ github.workspace }}:/root/scan \
+          aquasec/trivy image \
+          --format json \
+          --output /root/scan/trivy-report.json \
+          $IMAGE_NAME:${{ github.run_number }}
+
+    - name: Push to DockerHub
+      run: |
+        echo "${{ secrets.DOCKER_HUB_TOKEN }}" | docker login -u narsi421 --password-stdin
+        docker push $IMAGE_NAME:${{ github.run_number }}
+
+    - name: Prepare DefectDojo Data
+      id: defectdojo
+      run: |
+        # Get product info from engagement
+        engagement_info=$(curl -s -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
+          "${{ secrets.DEFECTDOJO_URL }}/api/v2/engagements/${{ env.DEFECTDOJO_ENGAGEMENT_ID }}/")
+        
+        product_id=$(echo "$engagement_info" | jq -r '.product')
+        product_name=$(echo "$engagement_info" | jq -r '.product_name // empty')
+        
+        if [ -z "$product_name" ]; then
+          product_name=$(curl -s -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
+            "${{ secrets.DEFECTDOJO_URL }}/api/v2/products/$product_id/" | jq -r '.name')
+        fi
+        
+        echo "product_id=$product_id" >> $GITHUB_OUTPUT
+        echo "product_name=$product_name" >> $GITHUB_OUTPUT
+
+        # Download and transform SonarQube report
         curl -u ${{ secrets.SONAR_TOKEN }}: \
           "${{ secrets.SONAR_URL }}/api/issues/search?componentKeys=${{ env.SONAR_PROJECT_KEY }}&resolved=false&ps=500" \
-          -o sonarqube-report.json
-        echo "Report downloaded ($(wc -c < sonarqube-report.json) bytes)"
-
-    - name: Transform Report
-      run: |
-        # Convert to DefectDojo's expected format
+          -o sonarqube-raw.json
+        
         jq '{
-          "issues": .issues
-        }' sonarqube-report.json > defectdojo-ready.json
+          findings: [.issues[] | {
+            title: .message,
+            severity: (if .severity == "BLOCKER" then "Critical"
+                     elif .severity == "CRITICAL" then "High"
+                     elif .severity == "MAJOR" then "Medium"
+                     elif .severity == "MINOR" then "Low"
+                     else "Info" end),
+            description: (.component + ": " + .message),
+            file_path: .component,
+            line: .textRange.startLine,
+            vulnerability_ids: [{"vulnerability_id": .rule}]
+          }]
+        }' sonarqube-raw.json > sonarqube-ready.json
 
-    - name: Upload to DefectDojo (Official Method)
+    - name: Upload Security Reports to DefectDojo
       run: |
+        # Upload Trivy Report
         curl -v -X POST \
           "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
           -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
-          -F "scan_type=SonarQube Scan" \  # Official documented type
+          -F "scan_type=Trivy Scan" \
           -F "engagement=${{ env.DEFECTDOJO_ENGAGEMENT_ID }}" \
-          -F "file=@defectdojo-ready.json" \
+          -F "product=${{ steps.defectdojo.outputs.product_id }}" \
+          -F "product_name=${{ steps.defectdojo.outputs.product_name }}" \
+          -F "file=@trivy-report.json" \
           -F "close_old_findings=true" \
           -F "verified=true" \
-          -F "active=true" \
-          --output response.txt
-        
-        echo "=== Server Response ==="
-        cat response.txt
-        grep "HTTP_STATUS" response.txt || echo "No status code received"
+          --output trivy-upload.log
 
-    - name: Cleanup
-      if: always()
-      run: rm -f sonarqube-report.json defectdojo-ready.json response.txt
+        # Upload SonarQube Report
+        curl -v -X POST \
+          "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+          -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
+          -F "scan_type=SonarQube Scan" \
+          -F "engagement=${{ env.DEFECTDOJO_ENGAGEMENT_ID }}" \
+          -F "product=${{ steps.defectdojo.outputs.product_id }}" \
+          -F "product_name=${{ steps.defectdojo.outputs.product_name }}" \
+          -F "file=@sonarqube-ready.json" \
+          -F "close_old_findings=true" \
+          -F "verified=true" \
+          --output sonarqube-upload.log
+
+    - name: Deploy Application
+      uses: appleboy/ssh-action@v1
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          docker pull $IMAGE_NAME:${{ github.run_number }}
+          docker stop juice-shop || true
+          docker rm juice-shop || true
+          docker run -d --name juice-shop -p 3000:3000 $IMAGE_NAME:${{ github.run_number }}
+          sleep 10
+          docker logs juice-shop --tail 50 || true
+
+    - name: Archive Reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-reports
+        path: |
+          trivy-report.json
+          sonarqube-ready.json
+          trivy-upload.log
+          sonarqube-upload.log
