@@ -15,11 +15,6 @@ jobs:
     runs-on: self-hosted
 
     steps:
-    - name: Clean Workspace
-      run: |
-        sudo rm -rf /opt/runner/_work/*
-        docker system prune -af || true
-
     - name: Checkout source
       uses: actions/checkout@v4
 
@@ -46,58 +41,32 @@ jobs:
         curl -u ${{ secrets.SONAR_TOKEN }}: \
           "${{ secrets.SONAR_URL }}/api/issues/search?componentKeys=${{ env.SONAR_PROJECT_KEY }}&resolved=false&ps=500" \
           -o sonarqube-report.json
+        echo "Report downloaded ($(wc -c < sonarqube-report.json) bytes)"
 
-    - name: Transform Report for DefectDojo
+    - name: Transform Report
       run: |
-        # Convert to DefectDojo-compatible format
+        # Convert to DefectDojo's expected format
         jq '{
-          "findings": [.issues[] | {
-            "title": .message,
-            "severity": (if .severity == "BLOCKER" then "Critical"
-                      elif .severity == "CRITICAL" then "High"
-                      elif .severity == "MAJOR" then "Medium"
-                      elif .severity == "MINOR" then "Low"
-                      else "Info" end),
-            "description": (.component + ": " + .message),
-            "file_path": .component,
-            "line": .textRange.startLine,
-            "vulnerability_ids": [{"vulnerability_id": .rule}]
-          }]
+          "issues": .issues
         }' sonarqube-report.json > defectdojo-ready.json
 
-    - name: Get Valid Scan Types
-      id: get_scan_types
+    - name: Upload to DefectDojo (Official Method)
       run: |
-        scan_types=$(curl -s -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
-          "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" | jq '.actions.POST.scan_type.choices[]')
-        echo "Available scan types: $scan_types"
-        echo "scan_types=$scan_types" >> $GITHUB_OUTPUT
-
-    - name: Upload to DefectDojo
-      run: |
-        # Try common SonarQube scan type variants
-        for scan_type in "SonarQube Scan" "SonarQube detailed" "SonarQube"; do
-          echo "Trying scan type: $scan_type"
-          response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-            "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
-            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
-            -F "scan_type=$scan_type" \
-            -F "engagement=${{ env.DEFECTDOJO_ENGAGEMENT_ID }}" \
-            -F "file=@defectdojo-ready.json" \
-            -F "close_old_findings=true" \
-            -F "verified=true")
-          
-          http_code=$(echo "$response" | grep 'HTTP_STATUS:' | cut -d':' -f2)
-          if [ "$http_code" -eq 201 ]; then
-            echo "Upload successful with scan type: $scan_type"
-            exit 0
-          fi
-        done
-        echo "All scan type attempts failed"
-        exit 1
+        curl -v -X POST \
+          "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+          -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
+          -F "scan_type=SonarQube Scan" \  # Official documented type
+          -F "engagement=${{ env.DEFECTDOJO_ENGAGEMENT_ID }}" \
+          -F "file=@defectdojo-ready.json" \
+          -F "close_old_findings=true" \
+          -F "verified=true" \
+          -F "active=true" \
+          --output response.txt
+        
+        echo "=== Server Response ==="
+        cat response.txt
+        grep "HTTP_STATUS" response.txt || echo "No status code received"
 
     - name: Cleanup
       if: always()
-      run: |
-        rm -f sonarqube-report.json defectdojo-ready.json
-        docker system prune -f
+      run: rm -f sonarqube-report.json defectdojo-ready.json response.txt
