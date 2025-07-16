@@ -15,13 +15,6 @@ jobs:
     runs-on: self-hosted
 
     steps:
-    - name: Clean Workspace (Pre-Job)
-      run: |
-        echo "=== Freeing Disk Space ==="
-        sudo rm -rf /opt/runner/_work/*
-        docker system prune -af || true
-        sudo journalctl --vacuum-size=100M
-
     - name: Checkout source
       uses: actions/checkout@v4
 
