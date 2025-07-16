@@ -8,7 +8,7 @@ on:
 env:
   SONAR_PROJECT_KEY: juice-shop
   SONAR_PROJECT_NAME: JuiceShop
-  DEFECTDOJO_ENGAGEMENT_ID: 4
+  DEFECTDOJO_ENGAGEMENT_ID: 1
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
