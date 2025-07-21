@@ -1,15 +1,18 @@
-name: SonarQube Native Scan to DefectDojo
+name: CI/CD via Self-Hosted Runner
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 env:
+  IMAGE_NAME: narsi421/juice-shop
   SONAR_PROJECT_KEY: juice-shop
   SONAR_PROJECT_NAME: JuiceShop
   DEFECTDOJO_ENGAGEMENT_ID: 1
 
 jobs:
-  sonarq-scanner:
+  juice-shop-pipeline:
     runs-on: self-hosted
 
     steps:
@@ -22,10 +25,15 @@ jobs:
         java-version: '21'
         distribution: 'temurin'
 
+    - name: Set up Node.js 21
+      uses: actions/setup-node@v4
+      with:
+        node-version: '21'
+
     - name: Add SonarScanner to PATH
       run: echo "/opt/sonar-scanner/bin" >> $GITHUB_PATH
 
-    - name: Run SonarQube Native Scan
+    - name: SonarQube Analysis
       run: |
         sonar-scanner \
           -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }} \
@@ -34,18 +42,25 @@ jobs:
           -Dsonar.host.url=${{ secrets.SONAR_URL }} \
           -Dsonar.login=${{ secrets.SONAR_TOKEN }}
 
+    - name: Download SonarQube Report
+      run: |
+        curl -u ${{ secrets.SONAR_TOKEN }}: \
+          "${{ secrets.SONAR_URL }}/api/issues/search?componentKeys=${{ env.SONAR_PROJECT_KEY }}&resolved=false" \
+          -o sonarqube-report.json
+
     - name: Upload SonarQube Report to DefectDojo
       run: |
-        curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
-          -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
+        curl -X POST "${{ secrets.DOJO_URL }}/api/v2/import-scan/" \
+          -H "Authorization: Token ${{ secrets.DOJO_API_TOKEN }}" \
           -F "scan_type=SonarQube Scan" \
           -F "engagement=${{ env.DEFECTDOJO_ENGAGEMENT_ID }}" \
-          -F "file=@.scannerwork/sonar-report.json" \
+          -F "file=@sonarqube-report.json" \
           -F "active=true" \
           -F "verified=true"
 
-    - name: Archive SonarQube Report
+    - name: Archive JSON Reports
       uses: actions/upload-artifact@v4
       with:
-        name: sonar-scan-results
-        path: .scannerwork/sonar-report.json
+        name: scan-results
+        path: |
+          sonarqube-report.json
