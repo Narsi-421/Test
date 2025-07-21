@@ -1,0 +1,35 @@
+name: SonarQube Results to DefectDojo
+
+on:
+  workflow_dispatch:
+
+env:
+  SONAR_PROJECT_KEY: juice-shop
+  DEFECTDOJO_ENGAGEMENT_ID: 1
+
+jobs:
+  sonar-to-dojo:
+    runs-on: self-hosted
+
+    steps:
+    - name: Download SonarQube Issues Report
+      run: |
+        curl -u ${{ secrets.SONAR_TOKEN }}: \
+          "${{ secrets.SONAR_URL }}/api/issues/search?componentKeys=${{ env.SONAR_PROJECT_KEY }}&resolved=false" \
+          -o sonarqube-report.json
+
+    - name: Upload to DefectDojo
+      run: |
+        curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+          -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
+          -F "scan_type=SonarQube Scan" \
+          -F "engagement=${{ env.DEFECTDOJO_ENGAGEMENT_ID }}" \
+          -F "file=@sonarqube-report.json" \
+          -F "active=true" \
+          -F "verified=true"
+
+    - name: Archive SonarQube Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: sonarqube-report
+        path: sonarqube-report.json
