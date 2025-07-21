@@ -1,79 +1,54 @@
-name: CI/CD via Self-Hosted Runner
+name: SonarQube Results to DefectDojo (Filtered & Paginated)
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: narsi421/juice-shop
   SONAR_PROJECT_KEY: juice-shop
-  SONAR_PROJECT_NAME: JuiceShop
   DEFECTDOJO_ENGAGEMENT_ID: 1
 
 jobs:
-  juice-shop-pipeline:
+  sonar-to-dojo:
     runs-on: self-hosted
 
     steps:
-    - name: Checkout source
-      uses: actions/checkout@v4
-
-    - name: Set up JDK 21
-      uses: actions/setup-java@v4
-      with:
-        java-version: '21'
-        distribution: 'temurin'
-
-    - name: Set up Node.js 21
-      uses: actions/setup-node@v4
-      with:
-        node-version: '21'
-
-    - name: Add SonarScanner to PATH
-      run: echo "/opt/sonar-scanner/bin" >> $GITHUB_PATH
-
-    - name: SonarQube Analysis
-      run: |
-        sonar-scanner \
-          -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }} \
-          -Dsonar.projectName=${{ env.SONAR_PROJECT_NAME }} \
-          -Dsonar.sources=. \
-          -Dsonar.host.url=${{ secrets.SONAR_URL }} \
-          -Dsonar.login=${{ secrets.SONAR_TOKEN }}
-
-    - name: Download All SonarQube Issues (Paginated)
+    - name: Fetch and upload filtered SonarQube issues
       run: |
         mkdir -p sonarqube-pages
-        PAGE=1
-        PAGE_SIZE=100
-        while true; do
-          echo "Fetching SonarQube issues page $PAGE"
-          curl -s -u ${{ secrets.SONAR_TOKEN }}: \
-            "${{ secrets.SONAR_URL }}/api/issues/search?componentKeys=${{ env.SONAR_PROJECT_KEY }}&resolved=false&p=$PAGE&ps=$PAGE_SIZE" \
-            -o sonarqube-pages/issues-page-${PAGE}.json
 
-          COUNT=$(jq '.issues | length' sonarqube-pages/issues-page-${PAGE}.json)
-          if [ "$COUNT" -lt "$PAGE_SIZE" ]; then
-            break
-          fi
-          PAGE=$((PAGE + 1))
+        for SEVERITY in BLOCKER CRITICAL MAJOR; do
+          PAGE=1
+          TOTAL=100
+          while [ $TOTAL -eq 100 ]; do
+            echo "Fetching $SEVERITY issues page $PAGE"
+            FILENAME="sonarqube-pages/${SEVERITY}_page-${PAGE}.json"
+
+            curl -s -u ${{ secrets.SONAR_TOKEN }}: \
+              "${{ secrets.SONAR_URL }}/api/issues/search?componentKeys=${{ env.SONAR_PROJECT_KEY }}&resolved=false&severities=$SEVERITY&pageSize=100&p=$PAGE" \
+              -o "$FILENAME"
+
+            COUNT=$(jq '.issues | length' "$FILENAME")
+            if [ "$COUNT" -eq 0 ]; then
+              echo "No more $SEVERITY issues on page $PAGE."
+              break
+            fi
+
+            echo "Uploading $FILENAME to DefectDojo..."
+            curl -s -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+              -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
+              -F "scan_type=SonarQube Scan" \
+              -F "engagement=${{ env.DEFECTDOJO_ENGAGEMENT_ID }}" \
+              -F "file=@$FILENAME" \
+              -F "active=true" \
+              -F "verified=true"
+
+            PAGE=$((PAGE + 1))
+            TOTAL=$COUNT
+          done
         done
-        zip -r sonar-issues.zip sonarqube-pages/
 
-    - name: Upload SonarQube Report (ZIP) to DefectDojo
-      run: |
-        curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
-          -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
-          -F "scan_type=SonarQube Scan" \
-          -F "engagement=${{ env.DEFECTDOJO_ENGAGEMENT_ID }}" \
-          -F "file=@sonar-issues.zip" \
-          -F "active=true" \
-          -F "verified=true"
-
-    - name: Archive SonarQube Reports
+    - name: Archive SonarQube Issue JSONs
       uses: actions/upload-artifact@v4
       with:
-        name: sonarqube-scan-pages
-        path: |
-          sonar-issues.zip
+        name: sonarqube-pages
+        path: sonarqube-pages/
