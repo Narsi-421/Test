@@ -12,7 +12,6 @@ env:
 
 jobs:
   upload_dependabot_alerts:
-    name: Import Dependabot alerts as GitHub Vulnerability Scan
     runs-on: ubuntu-latest
 
     steps:
@@ -30,21 +29,40 @@ jobs:
             repository(name: "${REPO_NAME}", owner: "${OWNER}") {
               vulnerabilityAlerts(first: 100) {
                 nodes {
-                  number
+                  createdAt
                   state
                   vulnerableManifestPath
+                  vulnerableRequirements
                   securityVulnerability {
                     severity
                     package {
                       name
                       ecosystem
                     }
+                    firstPatchedVersion {
+                      identifier
+                    }
+                    vulnerableVersionRange
                     advisory {
                       summary
                       description
                       identifiers {
-                        type
                         value
+                        type
+                      }
+                      references {
+                        url
+                      }
+                      cvss {
+                        score
+                        vectorString
+                      }
+                      cwes(first: 5) {
+                        nodes {
+                          cweId
+                          name
+                          description
+                        }
                       }
                     }
                   }
@@ -54,56 +72,22 @@ jobs:
           }
           EOF
 
-      - name: Query GitHub GraphQL API for Dependabot alerts
+      - name: Run GraphQL query and save alerts
         run: |
-          gh api graphql --field query="$(cat query.graphql)" > raw_dependabot.json
+          gh api graphql --field query="$(cat query.graphql)" > dependabot-security-alerts.json
         env:
           GITHUB_TOKEN: ${{ secrets.GH_SECURITY_TOKEN }}
 
-      - name: Convert GraphQL output to DefectDojo format
-        run: |
-          echo 'import json
+      - name: Print JSON file for debugging
+        run: cat dependabot-security-alerts.json
 
-          with open("raw_dependabot.json") as f:
-              data = json.load(f)
-
-          alerts = []
-          nodes = data.get("data", {}).get("repository", {}).get("vulnerabilityAlerts", {}).get("nodes", [])
-
-          for alert in nodes:
-              vuln = alert.get("securityVulnerability", {})
-              advisory = vuln.get("advisory", {})
-
-              alerts.append({
-                  "number": alert.get("number"),
-                  "state": alert.get("state").lower(),
-                  "dependency": {
-                      "package": vuln.get("package"),
-                      "manifest_path": alert.get("vulnerableManifestPath")
-                  },
-                  "security_advisory": {
-                      "summary": advisory.get("summary"),
-                      "description": advisory.get("description"),
-                      "severity": vuln.get("severity"),
-                      "identifiers": advisory.get("identifiers", [])
-                  }
-              })
-
-          output = {"alerts": alerts}
-
-          with open("defectdojo-dependabot.json", "w") as f:
-              json.dump(output, f, indent=2)
-          ' > convert.py
-
-          python3 convert.py
-
-      - name: Upload converted JSON to DefectDojo
+      - name: Upload to DefectDojo
         run: |
           curl -X POST "${{ secrets.DEFECTDOJO_PRO_URL }}/api/v2/import-scan/" \
             -H "Authorization: Token ${{ secrets.DEFECTDOJO_PRO_API_TOKEN }}" \
             -F "product_name=${{ env.DEFECTDOJO_PRODUCT_NAME }}" \
             -F "engagement=${{ env.ENGAGEMENT_ID }}" \
             -F "scan_type=Github Vulnerability Scan" \
-            -F "file=@defectdojo-dependabot.json" \
+            -F "file=@dependabot-security-alerts.json" \
             -F "active=true" \
             -F "verified=true"
