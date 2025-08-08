@@ -12,6 +12,7 @@ env:
 
 jobs:
   upload_dependabot_alerts:
+    name: Import Dependabot alerts as GitHub Vulnerability Scan
     runs-on: ubuntu-latest
 
     steps:
@@ -29,6 +30,8 @@ jobs:
             repository(name: "${REPO_NAME}", owner: "${OWNER}") {
               vulnerabilityAlerts(first: 100) {
                 nodes {
+                  id
+                  number
                   createdAt
                   state
                   vulnerableManifestPath
@@ -54,8 +57,8 @@ jobs:
                         url
                       }
                       cvss {
-                        score
                         vectorString
+                        score
                       }
                       cwes(first: 5) {
                         nodes {
@@ -72,22 +75,23 @@ jobs:
           }
           EOF
 
-      - name: Run GraphQL query and save alerts
+      - name: Query GitHub GraphQL API for Dependabot alerts
         run: |
-          gh api graphql --field query="$(cat query.graphql)" > dependabot-security-alerts.json
+          gh api graphql --field query="$(cat query.graphql)" > full-dependabot-response.json
         env:
           GITHUB_TOKEN: ${{ secrets.GH_SECURITY_TOKEN }}
 
-      - name: Print JSON file for debugging
-        run: cat dependabot-security-alerts.json
-
-      - name: Upload to DefectDojo
+      - name: Extract alerts for DefectDojo
         run: |
-          curl -X POST "${{ secrets.DEFECTDOJO_PRO_URL }}/api/v2/import-scan/" \
-            -H "Authorization: Token ${{ secrets.DEFECTDOJO_PRO_API_TOKEN }}" \
+          jq '.data.repository.vulnerabilityAlerts.nodes' full-dependabot-response.json > parsed-alerts.json
+
+      - name: Upload Dependabot alerts to DefectDojo
+        run: |
+          curl -X POST "${{ secrets.DEFECTDOJO_URL_NGROK }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_TOKEN }}" \
             -F "product_name=${{ env.DEFECTDOJO_PRODUCT_NAME }}" \
             -F "engagement=${{ env.ENGAGEMENT_ID }}" \
             -F "scan_type=Github Vulnerability Scan" \
-            -F "file=@dependabot-security-alerts.json" \
+            -F "file=@parsed-alerts.json" \
             -F "active=true" \
             -F "verified=true"
