@@ -1,47 +1,59 @@
-- name: Get Dependabot alerts
-  run: |
-    gh api graphql -f query='
-    {
-      repository(owner: "YOUR_ORG", name: "YOUR_REPO") {
-        vulnerabilityAlerts(first: 100) {
-          nodes {
-            id
-            number
-            createdAt
-            dismissedAt
-            securityVulnerability {
-              severity
-              package {
-                ecosystem
-                name
-              }
-              advisory {
-                identifiers {
-                  type
-                  value
-                }
-                references {
-                  url
+name: Import Dependabot Alerts to DefectDojo
+
+on:
+  workflow_dispatch:
+
+jobs:
+  import-dependabot-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Get Dependabot alerts
+        run: |
+          gh api graphql -f query='
+          {
+            repository(owner: "YOUR_ORG", name: "YOUR_REPO") {
+              vulnerabilityAlerts(first: 100) {
+                nodes {
+                  id
+                  number
+                  createdAt
+                  dismissedAt
+                  securityVulnerability {
+                    severity
+                    package {
+                      ecosystem
+                      name
+                    }
+                    advisory {
+                      identifiers {
+                        type
+                        value
+                      }
+                      references {
+                        url
+                      }
+                    }
+                  }
                 }
               }
             }
-          }
-        }
-      }
-    }' > full-dependabot-response.json
+          }' > full-dependabot-response.json
 
-- name: Wrap alerts in parser schema
-  run: |
-    jq '{ repository: { vulnerabilityAlerts: { nodes: .data.repository.vulnerabilityAlerts.nodes } } }' \
-       full-dependabot-response.json > wrapped-alerts.json
+      - name: Wrap alerts in parser schema
+        run: |
+          jq '{ repository: { vulnerabilityAlerts: { nodes: .data.repository.vulnerabilityAlerts.nodes } } }' \
+             full-dependabot-response.json > wrapped-alerts.json
 
-- name: Upload Dependabot alerts to DefectDojo
-  run: |
-    curl -X POST "${{ secrets.DEFECTDOJO_PRO_URL }}/api/v2/import-scan/" \
-      -H "Authorization: Token ${{ secrets.DEFECTDOJO_PRO_API_TOKEN }}" \
-      -F "product_name=${{ env.DEFECTDOJO_PRODUCT_NAME }}" \
-      -F "engagement=${{ env.ENGAGEMENT_ID }}" \
-      -F "scan_type=Github Vulnerability Scan" \
-      -F "file=@wrapped-alerts.json" \
-      -F "active=true" \
-      -F "verified=true"
+      - name: Upload Dependabot alerts to DefectDojo
+        run: |
+          curl -X POST "${{ secrets.DEFECTDOJO_PRO_URL }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_PRO_API_TOKEN }}" \
+            -F "product_name=${{ env.DEFECTDOJO_PRODUCT_NAME }}" \
+            -F "engagement=${{ env.ENGAGEMENT_ID }}" \
+            -F "scan_type=Github Vulnerability Scan" \
+            -F "file=@wrapped-alerts.json" \
+            -F "active=true" \
+            -F "verified=true"
