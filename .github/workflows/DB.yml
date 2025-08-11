@@ -1,97 +1,47 @@
-name: Send Dependabot Security Alerts to DefectDojo
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-env:
-  DEFECTDOJO_PRODUCT_NAME: test
-  ENGAGEMENT_ID: 1
-
-jobs:
-  upload_dependabot_alerts:
-    name: Import Dependabot alerts as GitHub Vulnerability Scan
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Set repository details
-        run: |
-          OWNER="${GITHUB_REPOSITORY%%/*}"
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          echo "OWNER=${OWNER}" >> $GITHUB_ENV
-          echo "REPO_NAME=${REPO_NAME}" >> $GITHUB_ENV
-
-      - name: Create GraphQL query file
-        run: |
-          cat <<EOF > query.graphql
-          query {
-            repository(name: "${REPO_NAME}", owner: "${OWNER}") {
-              vulnerabilityAlerts(first: 100) {
-                nodes {
-                  id
-                  number
-                  createdAt
-                  state
-                  vulnerableManifestPath
-                  vulnerableRequirements
-                  securityVulnerability {
-                    severity
-                    package {
-                      name
-                      ecosystem
-                    }
-                    firstPatchedVersion {
-                      identifier
-                    }
-                    vulnerableVersionRange
-                    advisory {
-                      summary
-                      description
-                      identifiers {
-                        value
-                        type
-                      }
-                      references {
-                        url
-                      }
-                      cvss {
-                        vectorString
-                        score
-                      }
-                      cwes(first: 5) {
-                        nodes {
-                          cweId
-                          name
-                          description
-                        }
-                      }
-                    }
-                  }
+- name: Get Dependabot alerts
+  run: |
+    gh api graphql -f query='
+    {
+      repository(owner: "YOUR_ORG", name: "YOUR_REPO") {
+        vulnerabilityAlerts(first: 100) {
+          nodes {
+            id
+            number
+            createdAt
+            dismissedAt
+            securityVulnerability {
+              severity
+              package {
+                ecosystem
+                name
+              }
+              advisory {
+                identifiers {
+                  type
+                  value
+                }
+                references {
+                  url
                 }
               }
             }
           }
-          EOF
+        }
+      }
+    }' > full-dependabot-response.json
 
-      - name: Query GitHub GraphQL API for Dependabot alerts
-        run: |
-          gh api graphql --field query="$(cat query.graphql)" > full-dependabot-response.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_SECURITY_TOKEN }}
+- name: Wrap alerts in parser schema
+  run: |
+    jq '{ repository: { vulnerabilityAlerts: { nodes: .data.repository.vulnerabilityAlerts.nodes } } }' \
+       full-dependabot-response.json > wrapped-alerts.json
 
-      - name: Extract alerts for DefectDojo
-        run: |
-          jq '.data.repository.vulnerabilityAlerts.nodes' full-dependabot-response.json > parsed-alerts.json
-
-      - name: Upload Dependabot alerts to DefectDojo
-        run: |
-          curl -X POST "${{ secrets.DEFECTDOJO_PRO_URL }}/api/v2/import-scan/" \
-            -H "Authorization: Token ${{ secrets.DEFECTDOJO_PRO_API_TOKEN }}" \
-            -F "product_name=${{ env.DEFECTDOJO_PRODUCT_NAME }}" \
-            -F "engagement=${{ env.ENGAGEMENT_ID }}" \
-            -F "scan_type=Github Vulnerability Scan" \
-            -F "file=@parsed-alerts.json" \
-            -F "active=true" \
-            -F "verified=true"
+- name: Upload Dependabot alerts to DefectDojo
+  run: |
+    curl -X POST "${{ secrets.DEFECTDOJO_PRO_URL }}/api/v2/import-scan/" \
+      -H "Authorization: Token ${{ secrets.DEFECTDOJO_PRO_API_TOKEN }}" \
+      -F "product_name=${{ env.DEFECTDOJO_PRODUCT_NAME }}" \
+      -F "engagement=${{ env.ENGAGEMENT_ID }}" \
+      -F "scan_type=Github Vulnerability Scan" \
+      -F "file=@wrapped-alerts.json" \
+      -F "active=true" \
+      -F "verified=true"
